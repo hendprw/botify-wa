@@ -12,9 +12,11 @@ import { Context } from "./Context.js";
  * ---
  * The main class of the Botify framework. Handles:
  *  - auth/session (via multi-file auth state)
- *  - connection lifecycle + auto-reconnect
- *  - command routing (through PluginManager)
+ *  - connection lifecycle + auto-reconnect (with exponential backoff)
+ *  - command routing (through PluginManager), including cooldowns and
+ *    owner/admin permission gates
  *  - a small event API on top of the underlying WhatsApp connection
+ *  - centralized error handling for command/middleware failures
  *
  * Everything low-level (encryption, sockets, WA protocol) lives in
  * vendor/core — Botify only adds structure on top.
@@ -26,7 +28,10 @@ export class Bot {
    *   prefix?: string,
    *   logLevel?: "trace"|"debug"|"info"|"warn"|"error"|"fatal"|"silent",
    *   printQR?: boolean,
-   *   socketConfig?: object
+   *   socketConfig?: object,
+   *   owners?: string[],            // JIDs allowed to run { owner: true } commands
+   *   reconnectBaseDelay?: number,  // ms, default 1000
+   *   reconnectMaxDelay?: number    // ms, default 30000
    * }} [options]
    */
   constructor(options = {}) {
@@ -40,6 +45,9 @@ export class Bot {
       // "error"/"silent" for even less output.
       logLevel: options.logLevel ?? "error",
       socketConfig: options.socketConfig ?? {},
+      owners: options.owners ?? [],
+      reconnectBaseDelay: options.reconnectBaseDelay ?? 1000,
+      reconnectMaxDelay: options.reconnectMaxDelay ?? 30_000,
     };
 
     this.plugins = new PluginManager();
@@ -47,6 +55,12 @@ export class Bot {
 
     /** @type {Map<string, Function[]>} */
     this._listeners = new Map();
+    /** @type {Function[]} */
+    this._errorHandlers = [];
+    /** consecutive failed-connection count, reset once "open" fires */
+    this._reconnectAttempts = 0;
+    /** guards against overlapping reconnect timers */
+    this._reconnectTimer = null;
   }
 
   /** Register a command. Shortcut for bot.plugins.command(...) */
@@ -62,7 +76,8 @@ export class Bot {
   }
 
   /**
-   * Listen to a Botify-level event: "ready", "message", "disconnect".
+   * Listen to a Botify-level event: "ready", "message", "disconnect",
+   * "unknownCommand", "cooldown", "noPermission", "qr".
    * (Raw core connection events are still available via bot.sock.ev)
    */
   on(event, handler) {
@@ -71,12 +86,45 @@ export class Bot {
     return this;
   }
 
+  /**
+   * Register a global error handler. Called whenever a command handler or
+   * middleware throws (sync or async). Multiple handlers can be registered;
+   * all of them run. If none are registered, errors are logged to console
+   * so failures are never silently swallowed.
+   * @param {(error: unknown, ctx: import('./Context.js').Context) => any} fn
+   */
+  onError(fn) {
+    this._errorHandlers.push(fn);
+    return this;
+  }
+
   _emit(event, ...args) {
     for (const fn of this._listeners.get(event) ?? []) fn(...args);
   }
 
+  async _handleError(error, ctx) {
+    if (this._errorHandlers.length === 0) {
+      console.error("[botify] Unhandled error in command/middleware:", error);
+      return;
+    }
+    for (const fn of this._errorHandlers) {
+      try {
+        await fn(error, ctx);
+      } catch (handlerError) {
+        // An error handler itself throwing should never crash the bot —
+        // just surface it so it isn't silently lost.
+        console.error("[botify] Error inside onError handler:", handlerError);
+      }
+    }
+  }
+
   /** Boot the bot: load/creates session, connects, wires up listeners. */
   async start() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(
       this.options.sessionPath
     );
@@ -105,16 +153,31 @@ export class Bot {
       }
 
       if (connection === "open") {
+        this._reconnectAttempts = 0;
         this._emit("ready", this.sock);
       }
 
       if (connection === "close") {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        this._emit("disconnect", { statusCode, willReconnect: shouldReconnect });
 
         if (shouldReconnect) {
-          this.start();
+          const delay = Math.min(
+            this.options.reconnectBaseDelay * 2 ** this._reconnectAttempts,
+            this.options.reconnectMaxDelay
+          );
+          this._reconnectAttempts++;
+
+          this._emit("disconnect", {
+            statusCode,
+            willReconnect: true,
+            reconnectDelayMs: delay,
+            attempt: this._reconnectAttempts,
+          });
+
+          this._reconnectTimer = setTimeout(() => this.start(), delay);
+        } else {
+          this._emit("disconnect", { statusCode, willReconnect: false });
         }
       }
     });
@@ -127,15 +190,29 @@ export class Bot {
 
         const ctx = new Context(this.sock, raw, {
           prefix: this.options.prefix,
+          owners: this.options.owners,
         });
 
         this._emit("message", ctx);
 
-        if (ctx.command) {
-          const handled = await this.plugins.dispatch(ctx.command, ctx);
-          if (handled === false) {
+        if (!ctx.command) continue;
+
+        const result = await this.plugins.dispatch(ctx.command, ctx);
+
+        switch (result.status) {
+          case "not_found":
             this._emit("unknownCommand", ctx);
-          }
+            break;
+          case "cooldown":
+            this._emit("cooldown", ctx, result.remainingMs);
+            break;
+          case "no_permission":
+            this._emit("noPermission", ctx, result.reason);
+            break;
+          case "error":
+            await this._handleError(result.error, ctx);
+            break;
+          // "ok" and "stopped" need no further action here
         }
       }
     });
@@ -145,6 +222,10 @@ export class Bot {
 
   /** Gracefully close the socket. */
   async stop() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     await this.sock?.end?.(undefined);
   }
 }
