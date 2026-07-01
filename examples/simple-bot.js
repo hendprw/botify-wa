@@ -65,6 +65,65 @@ bot.command(
   { aliases: ["help"] }
 );
 
+// ── Rich message handling ────────────────────────────────────────────────────
+
+// Auto-react to whatever media type someone sends (no command needed).
+bot.on("message", async (ctx) => {
+  if (ctx.command) return; // let the command handlers deal with these
+  if (ctx.isMedia) await ctx.react("👀");
+});
+
+// Send this as a caption on media, or reply to media, with "!save" to download it.
+bot.command(
+  "save",
+  async (ctx) => {
+    const target = ctx.isMedia ? ctx : ctx.quoted;
+    if (!target?.isMedia) {
+      return ctx.reply("Send this as a caption on media, or reply to media, with !save");
+    }
+    const buffer = await target.download();
+    await ctx.reply(`Downloaded ${buffer.length} bytes (${target.mimetype}).`);
+  },
+  { description: "Download media you send or reply to" }
+);
+
+// Reply to any image with "!sticker" to convert it into a sticker.
+bot.command(
+  "sticker",
+  async (ctx) => {
+    const target = ctx.type === "image" ? ctx : ctx.quoted;
+    if (target?.type !== "image") {
+      return ctx.reply("Send an image with !sticker, or reply to one.");
+    }
+    const buffer = await target.download();
+    await ctx.sendSticker(buffer);
+  },
+  { description: "Turn an image into a sticker" }
+);
+
+bot.command(
+  "location",
+  async (ctx) => {
+    await ctx.sendLocation({
+      latitude: -6.2,
+      longitude: 106.816666,
+      name: "Jakarta",
+      address: "Indonesia",
+    });
+  },
+  { description: "Send an example location pin" }
+);
+
+// Demonstrates ctx.edit() — edits the message that triggered it (self-bot
+// pattern: only works when the message being processed is the bot's own).
+bot.command(
+  "editme",
+  async (ctx) => {
+    await ctx.edit("✏️ (this message was edited by the bot)");
+  },
+  { description: "Edit the triggering message (only works on the bot's own messages)" }
+);
+
 // Demonstrates centralized error handling.
 bot.command("crash", async () => {
   throw new Error("boom — something went wrong inside the handler");
