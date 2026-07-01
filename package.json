@@ -1,15 +1,23 @@
 {
   "name": "botify-wa",
-  "version": "0.1.0",
-  "description": "Botify — a lightweight WhatsApp bot framework with a plugin/command system and clean event API. The WhatsApp protocol core is vendored in-repo so the framework doesn't depend on a third-party package that could disappear.",
+  "version": "0.2.0",
+  "description": "Lightweight WhatsApp bot framework with plugin system, built-in middlewares, and CLI scaffolding.",
   "main": "src/index.js",
   "type": "module",
+  "bin": {
+    "botify-wa": "./bin/botify.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "vendor/"
+  ],
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
     "start": "node examples/simple-bot.js",
-    "dev": "node --watch examples/simple-bot.js"
+    "dev":   "node --watch examples/simple-bot.js"
   },
   "keywords": [
     "whatsapp",
@@ -17,7 +25,8 @@
     "botify",
     "framework",
     "bot-framework",
-    "multi-device"
+    "multi-device",
+    "cli"
   ],
   "author": "",
   "license": "MIT",
@@ -44,17 +53,9 @@
     "sharp": "^0.35.2"
   },
   "peerDependenciesMeta": {
-    "audio-decode": {
-      "optional": true
-    },
-    "jimp": {
-      "optional": true
-    },
-    "link-preview-js": {
-      "optional": true
-    },
-    "sharp": {
-      "optional": true
-    }
+    "audio-decode": { "optional": true },
+    "jimp":         { "optional": true },
+    "link-preview-js": { "optional": true },
+    "sharp":        { "optional": true }
   }
 }

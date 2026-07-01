@@ -1,0 +1,45 @@
+# ──────────────────────────────────────────────
+# config.bt — Botify configuration file
+# Place this in the root of your bot project.
+# ──────────────────────────────────────────────
+# Syntax:
+#   key = value          (number, boolean, "string")
+#   key = ["a", "b"]     (inline array)
+#   [section]            (groups related keys)
+#   # comment            (ignored)
+#
+# All keys are optional. Missing keys fall back to Botify defaults.
+# Options passed to new Bot({...}) in code always override this file.
+# ──────────────────────────────────────────────
+
+[bot]
+prefix       = "!"
+session_path = "./session"
+log_level    = "error"
+print_qr     = true
+# Add your WhatsApp JID(s) to grant owner-level access.
+# Format: "628XXXXXXXXXX@s.whatsapp.net"
+owners       = []
+
+[reconnect]
+base_delay = 1000    # ms — first reconnect attempt
+max_delay  = 30000   # ms — cap for exponential backoff
+
+[cooldown]
+default = 0          # ms — global default for all commands (0 = disabled)
+# Customize the message sent when a user is on cooldown.
+# message = "⏳ Tunggu {remaining}s sebelum pakai command ini lagi."
+
+[anti_spam]
+enabled      = false
+window_ms    = 5000  # rolling window size in ms
+max_messages = 5     # max commands per sender per window
+# message = "🚫 Kamu terlalu cepat! Tunggu sebentar."
+
+[permission]
+# owner_message = "🚫 Command ini khusus owner bot."
+# admin_message = "🚫 Command ini khusus admin grup."
+
+[logger]
+enabled = true
+show_pn = true       # show phone number alongside LID in logs

@@ -9,18 +9,25 @@
  * always has *a* sender identifier to log (LID or phone-number JID,
  * whichever WhatsApp gave us), and optionally shows the real phone number
  * alongside it when available.
+ *
+ * Can be disabled via config.bt:
+ *   [logger]
+ *   enabled = false
  */
 
 /**
  * @param {{
- *   logFn?: (line: string) => void,     // defaults to console.log
- *   showPn?: boolean,                   // show phone number next to LID when known (default: true)
- *   format?: (ctx: import('../Context.js').Context) => string | Promise<string>
+ *   enabled?: boolean,                  // set false to disable entirely (default: true)
+ *   logFn?:   (line: string) => void,   // defaults to console.log
+ *   showPn?:  boolean,                  // show phone number next to LID when known (default: true)
+ *   format?:  (ctx: import('../Context.js').Context) => string | Promise<string>
  * }} [opts]
  * @returns {(ctx: import('../Context.js').Context) => Promise<void>}
  */
 export function logger(opts = {}) {
-  const logFn = opts.logFn ?? console.log;
+  if (opts.enabled === false) return () => {};
+
+  const logFn  = opts.logFn  ?? console.log;
   const showPn = opts.showPn ?? true;
   const format = opts.format ?? ((ctx) => defaultFormat(ctx, showPn));
 
