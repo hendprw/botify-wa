@@ -1,0 +1,37 @@
+# ──────────────────────────────────────────────
+# config.bt — Botify configuration
+# ──────────────────────────────────────────────
+
+[bot]
+prefix       = "!"
+session_path = "./session"
+log_level    = "error"
+print_qr     = true
+# owners = ["628XXXXXXXXXX@s.whatsapp.net"]
+
+[reconnect]
+base_delay = 1000
+max_delay  = 30000
+
+[cooldown]
+default = 0
+# message = "⏳ Tunggu {remaining}s lagi."
+
+[anti_spam]
+enabled      = false
+window_ms    = 5000
+max_messages = 5
+# message = "🚫 Terlalu cepat! Tunggu sebentar."
+
+[permission]
+# owner_message = "🚫 Command ini khusus owner bot."
+# admin_message = "🚫 Command ini khusus admin grup."
+
+[logger]
+enabled = true
+show_pn = true
+
+[plugins]
+# Folder tempat command disimpan (relatif dari root bot).
+# Semua file .js di dalamnya di-load otomatis saat startup.
+dir = "./plugins"

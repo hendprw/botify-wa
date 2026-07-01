@@ -1,0 +1,20 @@
+# Development files
+examples/
+.github/
+*.md
+!README.md
+
+# Test & config
+*.test.js
+*.spec.js
+.eslintrc*
+.prettierrc*
+
+# Session & secrets
+session/
+.env
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

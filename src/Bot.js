@@ -3,18 +3,25 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from "../vendor/core/lib/index.js";
 import qrcode from "qrcode-terminal";
-import pino from "pino";
-import { PluginManager } from "./PluginManager.js";
-import { Context } from "./Context.js";
+import pino   from "pino";
+import { PluginManager }         from "./PluginManager.js";
+import { Context }               from "./Context.js";
+import { loadConfig, mergeConfig } from "./config/index.js";
+import { logger }    from "./middlewares/logger.js";
+import { cooldown }  from "./middlewares/cooldown.js";
+import { permission } from "./middlewares/permission.js";
+import { antiSpam }  from "./middlewares/antiSpam.js";
 
 /**
  * Bot
  * ---
  * The main class of the Botify framework. Handles:
+ *  - config.bt loading + merging with programmatic options (code wins)
  *  - auth/session (via multi-file auth state)
  *  - connection lifecycle + auto-reconnect (with exponential backoff)
- *  - command routing (through PluginManager), including cooldowns and
- *    owner/admin permission gates
+ *  - built-in middlewares: logger, permission, cooldown, antiSpam
+ *    (auto-registered in the correct order; user middlewares run after)
+ *  - command routing through PluginManager
  *  - a small event API on top of the underlying WhatsApp connection
  *  - centralized error handling for command/middleware failures
  *
@@ -24,44 +31,136 @@ import { Context } from "./Context.js";
 export class Bot {
   /**
    * @param {{
-   *   sessionPath?: string,
-   *   prefix?: string,
-   *   logLevel?: "trace"|"debug"|"info"|"warn"|"error"|"fatal"|"silent",
-   *   printQR?: boolean,
-   *   socketConfig?: object,
-   *   owners?: string[],            // JIDs allowed to run { owner: true } commands
+   *   sessionPath?:    string,
+   *   prefix?:         string,
+   *   logLevel?:       "trace"|"debug"|"info"|"warn"|"error"|"fatal"|"silent",
+   *   printQR?:        boolean,
+   *   socketConfig?:   object,
+   *   owners?:         string[],
+   *
+   *   defaultCooldown?: number,    // ms; applied when command omits cooldown
+   *   cooldownMessage?: string | ((ctx, remainingMs) => string),
+   *
+   *   antiSpam?: {
+   *     enabled?:     boolean,
+   *     windowMs?:    number,
+   *     maxMessages?: number,
+   *     message?:     string | ((ctx) => string),
+   *   },
+   *
+   *   permissionMessages?: {
+   *     owner?: string | ((ctx) => string),
+   *     admin?: string | ((ctx) => string),
+   *   },
+   *
+   *   logger?: {
+   *     enabled?: boolean,
+   *     showPn?:  boolean,
+   *     logFn?:   (line: string) => void,
+   *     format?:  (ctx) => string | Promise<string>,
+   *   },
+   *
    *   reconnectBaseDelay?: number,  // ms, default 1000
-   *   reconnectMaxDelay?: number    // ms, default 30000
+   *   reconnectMaxDelay?:  number,  // ms, default 30000
+   *
+   *   configDir?: string,  // directory to look for config.bt (default: cwd)
    * }} [options]
    */
   constructor(options = {}) {
+    // ── 1. Load config.bt then merge (code options override file) ────────────
+    const fileConfig = loadConfig(options.configDir);
+    const cfg = mergeConfig(fileConfig, options);
+
     this.options = {
-      sessionPath: options.sessionPath ?? "./session",
-      prefix: options.prefix ?? "!",
-      printQR: options.printQR ?? true,
-      // Default to "warn" so the terminal isn't flooded with the
-      // connection's internal info-level logs (pairing, sync, etc).
-      // Set to "info" or "debug" if you need to see everything, or
-      // "error"/"silent" for even less output.
-      logLevel: options.logLevel ?? "error",
-      socketConfig: options.socketConfig ?? {},
-      owners: options.owners ?? [],
-      reconnectBaseDelay: options.reconnectBaseDelay ?? 1000,
-      reconnectMaxDelay: options.reconnectMaxDelay ?? 30_000,
+      sessionPath:    cfg.sessionPath    ?? "./session",
+      prefix:         cfg.prefix         ?? "!",
+      printQR:        cfg.printQR        ?? true,
+      logLevel:       cfg.logLevel       ?? "error",
+      socketConfig:   cfg.socketConfig   ?? {},
+      owners:         cfg.owners         ?? [],
+
+      defaultCooldown:  cfg.defaultCooldown  ?? 0,
+      cooldownMessage:  cfg.cooldownMessage,
+
+      antiSpam: {
+        enabled:     cfg.antiSpam?.enabled     ?? false,
+        windowMs:    cfg.antiSpam?.windowMs    ?? 5_000,
+        maxMessages: cfg.antiSpam?.maxMessages ?? 5,
+        message:     cfg.antiSpam?.message,
+      },
+
+      permissionMessages: {
+        owner: cfg.permissionMessages?.owner,
+        admin: cfg.permissionMessages?.admin,
+      },
+
+      logger: {
+        enabled: cfg.logger?.enabled ?? true,
+        showPn:  cfg.logger?.showPn  ?? true,
+        logFn:   cfg.logger?.logFn,
+        format:  cfg.logger?.format,
+      },
+
+      reconnectBaseDelay: cfg.reconnectBaseDelay ?? 1_000,
+      reconnectMaxDelay:  cfg.reconnectMaxDelay  ?? 30_000,
     };
 
     this.plugins = new PluginManager();
-    this.sock = null;
+    this.sock    = null;
 
     /** @type {Map<string, Function[]>} */
-    this._listeners = new Map();
+    this._listeners    = new Map();
     /** @type {Function[]} */
     this._errorHandlers = [];
-    /** consecutive failed-connection count, reset once "open" fires */
     this._reconnectAttempts = 0;
-    /** guards against overlapping reconnect timers */
-    this._reconnectTimer = null;
+    this._reconnectTimer    = null;
+
+    // ── 2. Register built-in middlewares in the correct order ────────────────
+    //
+    //  Order matters:
+    //    1. logger      — log first so every attempt is recorded, even blocked ones
+    //    2. antiSpam    — global rate limit before any per-command check
+    //    3. permission  — owner / admin gate
+    //    4. cooldown    — per-user per-command throttle
+    //    (user middlewares added via bot.use() run after all of the above)
+
+    this.plugins.use(
+      logger({
+        enabled: this.options.logger.enabled,
+        showPn:  this.options.logger.showPn,
+        logFn:   this.options.logger.logFn,
+        format:  this.options.logger.format,
+      })
+    );
+
+    if (this.options.antiSpam.enabled) {
+      this.plugins.use(
+        antiSpam({
+          windowMs:    this.options.antiSpam.windowMs,
+          maxMessages: this.options.antiSpam.maxMessages,
+          message:     this.options.antiSpam.message,
+        })
+      );
+    }
+
+    this.plugins.use(
+      permission({
+        ownerMessage: this.options.permissionMessages.owner,
+        adminMessage:  this.options.permissionMessages.admin,
+        emitEvent: (ctx, reason) => this._emit("noPermission", ctx, reason),
+      })
+    );
+
+    this.plugins.use(
+      cooldown({
+        defaultCooldown: this.options.defaultCooldown,
+        message:         this.options.cooldownMessage,
+        emitEvent: (ctx, remainingMs) => this._emit("cooldown", ctx, remainingMs),
+      })
+    );
   }
+
+  // ── Public API ─────────────────────────────────────────────────────────────
 
   /** Register a command. Shortcut for bot.plugins.command(...) */
   command(name, handler, opts) {
@@ -69,16 +168,20 @@ export class Bot {
     return this;
   }
 
-  /** Register a middleware. Shortcut for bot.plugins.use(...) */
+  /**
+   * Register a user middleware.
+   * Runs AFTER all built-in middlewares (logger → antiSpam → permission → cooldown).
+   */
   use(fn) {
     this.plugins.use(fn);
     return this;
   }
 
   /**
-   * Listen to a Botify-level event: "ready", "message", "disconnect",
-   * "unknownCommand", "cooldown", "noPermission", "qr".
-   * (Raw core connection events are still available via bot.sock.ev)
+   * Listen to a Botify-level event:
+   *   "ready", "message", "disconnect", "unknownCommand",
+   *   "cooldown", "noPermission", "qr"
+   * Raw core connection events are still available via bot.sock.ev.
    */
   on(event, handler) {
     if (!this._listeners.has(event)) this._listeners.set(event, []);
@@ -88,15 +191,16 @@ export class Bot {
 
   /**
    * Register a global error handler. Called whenever a command handler or
-   * middleware throws (sync or async). Multiple handlers can be registered;
-   * all of them run. If none are registered, errors are logged to console
-   * so failures are never silently swallowed.
+   * middleware throws. Multiple handlers can be registered; all run.
+   * If none are registered, errors are logged to console.
    * @param {(error: unknown, ctx: import('./Context.js').Context) => any} fn
    */
   onError(fn) {
     this._errorHandlers.push(fn);
     return this;
   }
+
+  // ── Internals ──────────────────────────────────────────────────────────────
 
   _emit(event, ...args) {
     for (const fn of this._listeners.get(event) ?? []) fn(...args);
@@ -111,14 +215,12 @@ export class Bot {
       try {
         await fn(error, ctx);
       } catch (handlerError) {
-        // An error handler itself throwing should never crash the bot —
-        // just surface it so it isn't silently lost.
         console.error("[botify] Error inside onError handler:", handlerError);
       }
     }
   }
 
-  /** Boot the bot: load/creates session, connects, wires up listeners. */
+  /** Boot the bot: load/create session, connect, wire up listeners. */
   async start() {
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
@@ -129,14 +231,14 @@ export class Bot {
       this.options.sessionPath
     );
 
-    const logger =
+    const logger_ =
       this.options.socketConfig.logger ??
       pino({ level: this.options.logLevel });
 
     this.sock = makeWASocket({
       auth: state,
       ...this.options.socketConfig,
-      logger,
+      logger: logger_,
     });
 
     this.sock.ev.on("creds.update", saveCreds);
@@ -158,7 +260,7 @@ export class Bot {
       }
 
       if (connection === "close") {
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const statusCode     = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         if (shouldReconnect) {
@@ -203,16 +305,10 @@ export class Bot {
           case "not_found":
             this._emit("unknownCommand", ctx);
             break;
-          case "cooldown":
-            this._emit("cooldown", ctx, result.remainingMs);
-            break;
-          case "no_permission":
-            this._emit("noPermission", ctx, result.reason);
-            break;
           case "error":
             await this._handleError(result.error, ctx);
             break;
-          // "ok" and "stopped" need no further action here
+          // "ok" and "stopped" need no further action
         }
       }
     });
