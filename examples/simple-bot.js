@@ -167,6 +167,119 @@ bot.command(
   { description: "Send an example WhatsApp list menu" }
 );
 
+// Location card as an interactive message — custom thumbnail replaces WA's
+// auto-generated map snapshot, plus a mix of reply/url buttons AND a native
+// list-menu button, all in one message.
+//
+// NOTE: `location`'s thumbnail is embedded directly in the message (not
+// uploaded like normal media), so WA caps how big it can be — ~300px wide
+// is about the ceiling before WA silently rejects it and falls back to a
+// generic pin icon. If you want a genuinely crisp/HD image, see
+// `locationHdButtons` below instead.
+bot.command(
+  "locationbuttons",
+  async (ctx) => {
+    await ctx.sendButtons(
+      {
+        title: "📍 Kantor kami ada di sini",
+        footer: "Powered by Botify",
+        location: {
+          latitude: -6.2,
+          longitude: 106.816666,
+          name: "Jakarta",
+          address: "Indonesia",
+        },
+        thumbnail: "https://placehold.co/400x400.jpg",
+        thumbnailWidth: 300, // confirmed ceiling before WA rejects it
+      },
+      [
+        { type: "reply", text: "📞 Hubungi Kami", id: `${bot.options.prefix}ping` },
+        { type: "url", text: "🌐 Website", url: "https://example.com" },
+        {
+          type: "list",
+          text: "📋 Lihat Menu",
+          sections: [
+            {
+              title: "Menu Utama",
+              rows: [
+                { title: "Produk A", id: "menu_produk_a", description: "Deskripsi produk A" },
+                { title: "Produk B", id: "menu_produk_b", description: "Deskripsi produk B" },
+              ],
+            },
+          ],
+        },
+      ]
+    );
+  },
+  { description: "Send a location card with a custom thumbnail + buttons + list menu" }
+);
+
+// Alternative when you actually want a crisp/HD image: use `image` (goes
+// through WA's normal media-upload pipeline, no embedded-thumbnail size
+// ceiling) instead of `location`, and put the location behind a Google
+// Maps link button. Same practical result for the user — full-quality
+// photo + one tap to open the location — without the ~300px cap.
+bot.command(
+  "locationhdbuttons",
+  async (ctx) => {
+    const latitude = -6.2;
+    const longitude = 106.816666;
+    await ctx.sendButtons(
+      {
+        title: "📍 Kantor kami ada di Jakarta, Indonesia\n\nKantor kami ada di sini",
+        footer: "Powered by Botify",
+        image: "https://placehold.co/400x400.jpg", // full quality, no cap
+      },
+      [
+        { type: "reply", text: "📞 Hubungi Kami", id: `${bot.options.prefix}ping` },
+        { type: "url", text: "📍 Buka di Google Maps", url: `https://maps.google.com/?q=${latitude},${longitude}` },
+        { type: "url", text: "🌐 Website", url: "https://example.com" },
+        {
+          type: "list",
+          text: "📋 Lihat Menu",
+          sections: [
+            {
+              title: "Menu Utama",
+              rows: [
+                { title: "Produk A", id: "menu_produk_a", description: "Deskripsi produk A" },
+                { title: "Produk B", id: "menu_produk_b", description: "Deskripsi produk B" },
+              ],
+            },
+          ],
+        },
+      ]
+    );
+  },
+  { description: "Same as !locationbuttons but with a full-HD image + a Google Maps link button instead of the native location card" }
+);
+
+// Zero-download "card" — great for leveling/rank cards, welcome cards, etc.
+// The thumbnail is embedded straight in the message (piggybacking on
+// locationMessage's jpegThumbnail field), so it never touches the media
+// CDN and costs the recipient no extra data — unlike a normal !sendImage().
+// (There's also ctx.sendCard(), but that needs a real URL in the text for
+// WA to render the preview box — use it only if a visible link is fine.)
+bot.command(
+  "rankcard",
+  async (ctx) => {
+    await ctx.sendButtons(
+      {
+        title: `Rank #3 in this group`,
+        footer: "Powered by Botify",
+        location: {
+          latitude: 0,
+          longitude: 0,
+          name: `⭐ Level 12 — ${ctx.pushName}`,
+          address: "XP: 4,200 / 5,000",
+        },
+        thumbnail: "https://placehold.co/700x700.jpg", // swap for a real generated rank-card image
+      },
+      [{ type: "reply", text: "🏆 Lihat Profil", id: `${bot.options.prefix}menu` }]
+    );
+  },
+  { description: "Send a rank/level card with zero media download cost" }
+);
+
 // Reply to two images with "!album" to group them into one gallery message.
 bot.command(
   "album",

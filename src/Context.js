@@ -1,6 +1,6 @@
 import { proto, makeStickerPack } from "../vendor/core/lib/index.js";
 import { detectMessageType, isMediaType, extractNativeFlowId } from "./utils/messageTypes.js";
-import { downloadMedia, saveMedia, resolveMediaSource, toVcard } from "./media.js";
+import { downloadMedia, saveMedia, resolveMediaSource, resolveThumbnail, toVcard } from "./media.js";
 import { Quoted } from "./Quoted.js";
 
 /**
@@ -322,6 +322,54 @@ export class Context {
     );
   }
 
+  /**
+   * Send a lightweight "card" — text with a thumbnail/title/description
+   * embedded directly in the message stanza, using the same mechanism as
+   * WhatsApp's own link-preview cards. Unlike `image`/`video`/`document`,
+   * this never touches WA's media CDN — the recipient sees the whole card
+   * the instant the message arrives, at zero extra data cost.
+   *
+   * IMPORTANT: WhatsApp's client only renders the preview box when the
+   * message text actually contains the matching link — there's no way
+   * around that from the server side. So `url` is required, and it WILL
+   * show up as visible, tappable blue text in the message (appended to
+   * `text` automatically if not already present). If you need a card with
+   * **no visible link at all**, use `sendButtons({ location, thumbnail }, …)`
+   * instead — that renders its embedded thumbnail unconditionally, no URL
+   * needed (see the `locationbuttons` example).
+   *
+   * Same ~300px practical ceiling on `thumbnail` as `sendButtons()`'s
+   * `location` thumbnail (embedded thumbnails are capped by WA) — plenty
+   * for a stat/level card, not meant for photos.
+   *
+   * @param {{ text?: string, title?: string, description?: string, thumbnail: Buffer|string, thumbnailWidth?: number, url: string }} content
+   *   `thumbnail`: Buffer, local path, or http(s) URL of the card image.
+   *   `url`: required — the link that makes WA render the card, shown as
+   *   visible tappable text.
+   */
+  async sendCard(content, opts = {}) {
+    const { text = "", title, description, thumbnail, thumbnailWidth = 192, url } = content;
+    if (!url) {
+      throw new Error(
+        'sendCard() requires a "url" — WhatsApp only renders the preview box when the message text contains a matching link. Use sendButtons({ location, thumbnail }, …) instead if you need a card with no visible link.'
+      );
+    }
+    const jpegThumbnail = await resolveThumbnail(thumbnail, thumbnailWidth);
+    const fullText = text.includes(url) ? text : `${text}${text ? "\n" : ""}${url}`;
+    return this.send(
+      {
+        text: fullText,
+        linkPreview: {
+          "matched-text": url,
+          title,
+          description,
+          jpegThumbnail,
+        },
+      },
+      { quoted: this.raw, ...opts }
+    );
+  }
+
   // ── Interactive (native flow) messages ────────────────────────────────
 
   /**
@@ -337,13 +385,32 @@ export class Context {
    * needs to recognize a tap as a real interactive response. Without it,
    * `quick_reply`/`cta_url`/`cta_copy` taps silently fall back to a plain
    * text reply on the recipient's end and never reach your bot.
-   * @param {{ title?: string, subtitle?: string, footer?: string, header?: string, image?, video?, document? }} content
+   * @param {{ title?: string, subtitle?: string, footer?: string, header?: string, image?, video?, document?, location?, thumbnail?, thumbnailWidth?, jpegThumbnail? }} content
    *   `title` is the main body text; `header` is the small line above it
    *   (matches what `interactiveMessage.title`/`.header` rendered as before).
-   * @param {Array<object>} buttons
+   *   `image`/`video`/`document`/`location` are mutually exclusive — pick one
+   *   to use as the card header. `thumbnail` (Buffer, local path, or http(s)
+   *   URL) overrides the header's preview image — most useful with
+   *   `location`, which otherwise shows WA's auto-generated map snapshot.
+   *   `thumbnailWidth` controls how sharp it comes out (default 192px,
+   *   matching the core's own convention for embedded thumbnails — going
+   *   much higher, e.g. 400+, risks WA rejecting it and falling back to a
+   *   generic placeholder icon). Use the raw `jpegThumbnail` (pre-encoded
+   *   JPEG Buffer/base64) instead of `thumbnail` if you want to skip the
+   *   resize step entirely.
+   * @param {Array<object>} buttons  Each is either the raw `{ name, buttonParamsJson }`
+   *   shape, or shorthand: `{ type: "reply"|"url"|"copy", ... }` (see
+   *   `normalizeButton`), or `{ type: "list", text, sections }` for a native
+   *   list-menu button (same `sections` shape as `sendListMenu()`).
    */
   async sendButtons(content, buttons, opts = {}) {
-    const { title, subtitle, footer, header, image, video, document, mimetype, jpegThumbnail } = content;
+    const {
+      title, subtitle, footer, header, image, video, document, location,
+      mimetype, jpegThumbnail, thumbnail, thumbnailWidth = 192,
+    } = content;
+    const resolvedThumbnail = thumbnail
+      ? await resolveThumbnail(thumbnail, thumbnailWidth)
+      : jpegThumbnail;
     return this.send(
       {
         text: title,
@@ -353,8 +420,9 @@ export class Context {
         ...(image ? { image: resolveMediaSource(image) } : {}),
         ...(video ? { video: resolveMediaSource(video) } : {}),
         ...(document ? { document: resolveMediaSource(document) } : {}),
+        ...(location ? { location } : {}),
         mimetype,
-        jpegThumbnail,
+        jpegThumbnail: resolvedThumbnail,
         interactiveButtons: buttons.map(normalizeButton),
       },
       { quoted: this.raw, ...opts }
@@ -730,7 +798,7 @@ export class Context {
 /**
  * Normalizes one button for `ctx.sendButtons()`. Passes through the raw
  * `{ name, buttonParamsJson }` shape untouched; converts the friendly
- * shorthand (`{ type: "reply"|"url"|"copy", ... }`) into that shape.
+ * shorthand (`{ type: "reply"|"url"|"copy"|"list", ... }`) into that shape.
  */
 function normalizeButton(button) {
   if (button.name && button.buttonParamsJson) return button;
@@ -751,8 +819,15 @@ function normalizeButton(button) {
         name: "cta_copy",
         buttonParamsJson: JSON.stringify({ display_text: button.text, copy_code: button.code }),
       };
+    case "list":
+      // Native list-menu button — tapping it opens the same row-picker UI
+      // as `ctx.sendListMenu()`. `sections`: Array<{ title, rows: Array<{ title, id, description? }> }>.
+      return {
+        name: "single_select",
+        buttonParamsJson: JSON.stringify({ title: button.text, sections: button.sections }),
+      };
     default:
-      throw new Error(`Unknown button type: "${button.type}". Use "reply", "url", or "copy".`);
+      throw new Error(`Unknown button type: "${button.type}". Use "reply", "url", "copy", or "list".`);
   }
 }
 

@@ -322,6 +322,16 @@ export class Dugong {
           degreesLongitude:
             location.degressLongitude || location.degreesLongitude || 0,
           name: location.name || "",
+          address: location.address || "",
+          // Custom thumbnail overrides WA's auto-generated map snapshot.
+          ...(jpegThumbnail
+            ? {
+                jpegThumbnail:
+                  typeof jpegThumbnail === "string"
+                    ? Buffer.from(jpegThumbnail, "base64")
+                    : jpegThumbnail,
+              }
+            : {}),
         },
       };
       mediaAttached =

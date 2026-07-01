@@ -7,7 +7,7 @@
  */
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
-import { downloadMediaMessage } from "../vendor/core/lib/index.js";
+import { downloadMediaMessage, extractImageThumb } from "../vendor/core/lib/index.js";
 
 /**
  * Download the media attached to a WA message (image/video/audio/sticker/
@@ -69,6 +69,45 @@ export function resolveMediaSource(source) {
   }
   if (typeof source === "string") return { url: source };
   return source;
+}
+
+/**
+ * Turns "any image" (Buffer, local file path, or http(s) URL) into a small
+ * JPEG thumbnail Buffer — the shape `jpegThumbnail` fields on the proto
+ * (interactive-message headers, location cards, etc.) expect.
+ *
+ * Unlike `resolveMediaSource()` (which just wraps a source for WA's normal
+ * media-upload pipeline), this actually resizes + JPEG-encodes the image,
+ * since `jpegThumbnail` is embedded inline in the message rather than
+ * uploaded, and WA expects it small (default width mirrors what the core
+ * generates for its own auto-thumbnails).
+ *
+ * @param {Buffer | string} source
+ * @param {number} [width] Thumbnail width in px (default 192 — matches the
+ *   core's own convention for embedded, non-uploaded thumbnails like link
+ *   previews; safe and reliably accepted by WhatsApp). This field is
+ *   embedded directly in the message rather than uploaded, so WA caps it
+ *   hard — confirmed safe up to ~300px, confirmed rejected (falls back to
+ *   a generic placeholder icon) at 400px. If you need a genuinely crisp
+ *   image, use an `image` header (normal media upload, no such cap) with
+ *   a Maps-link button instead of `location` — see the `locationhdbuttons`
+ *   example in examples/simple-bot.js.
+ * @returns {Promise<Buffer>}
+ */
+export async function resolveThumbnail(source, width = 730) {
+  if (source === null || source === undefined) {
+    throw new TypeError("Thumbnail source is required");
+  }
+  let input = source;
+  if (typeof source === "string" && /^https?:\/\//i.test(source)) {
+    const res = await fetch(source);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch thumbnail from ${source}: ${res.status}`);
+    }
+    input = Buffer.from(await res.arrayBuffer());
+  }
+  const { buffer } = await extractImageThumb(input, width);
+  return buffer;
 }
 
 /** Builds a minimal WhatsApp-compatible vCard from a simple {name, number}. */
