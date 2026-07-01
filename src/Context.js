@@ -1,5 +1,5 @@
-import { proto } from "../vendor/core/lib/index.js";
-import { detectMessageType, isMediaType } from "./utils/messageTypes.js";
+import { proto, makeStickerPack } from "../vendor/core/lib/index.js";
+import { detectMessageType, isMediaType, extractNativeFlowId } from "./utils/messageTypes.js";
 import { downloadMedia, saveMedia, resolveMediaSource, toVcard } from "./media.js";
 import { Quoted } from "./Quoted.js";
 
@@ -13,8 +13,10 @@ import { Quoted } from "./Quoted.js";
  * video, audio/voice-note, sticker, document, contact(s), location,
  * live location, polls, reactions, button/list replies, group invites,
  * products, events, and protocol messages like edits/deletes) — see
- * ctx.type. Also exposes media download, rich media sending, and
- * message-management actions (edit, delete, react, pin, star, forward).
+ * ctx.type. Also exposes media download, rich media sending (buttons,
+ * list menus, albums, sticker packs, AI-style rich tables/code blocks/
+ * links, payments, events, poll results, product cards, status mentions),
+ * and message-management actions (edit, delete, react, pin, star, forward).
  */
 export class Context {
   /**
@@ -156,6 +158,19 @@ export class Context {
       };
     }
 
+    // Native-flow response — what `ctx.sendButtons()` / `ctx.sendListMenu()`
+    // actually get back when tapped (WhatsApp's modern interactive-message
+    // format, distinct from the legacy buttonsMessage/listMessage above).
+    if (type === "interactiveResponse") {
+      const id = extractNativeFlowId(this._content);
+      this.buttonReply = { id, name: this._content.nativeFlowResponseMessage?.name ?? null };
+      // Also mirror onto listReply when it came from a list menu, so code
+      // written against either legacy or native-flow list replies works.
+      if (this._content.nativeFlowResponseMessage?.name === "single_select") {
+        this.listReply = { id, title: null };
+      }
+    }
+
     if (type === "groupInvite") {
       this.groupInvite = {
         jid: this._content.groupJid,
@@ -170,8 +185,19 @@ export class Context {
     }
 
     // ── Text + command parsing ────────────────────────────────────────────
-    this.text = extractText(rawMessage);
-    const parsed = parseCommand(this.text, botConfig.prefix);
+    // Button/list-row taps are commands by construction (the developer
+    // picked that id specifically to route to a command) — unlike free-typed
+    // text, they don't need to start with the configured prefix, and it
+    // doesn't matter which of WhatsApp's several reply formats echoed the
+    // tap back (`templateButtonReplyMessage`, `buttonsResponseMessage`,
+    // `listResponseMessage`, or the modern `interactiveResponseMessage`) —
+    // whichever it was, `ctx.buttonReply`/`ctx.listReply` above already
+    // normalized it down to a plain `.id`, so we just use that here too.
+    const tapId = this.buttonReply?.id ?? this.listReply?.id ?? null;
+    this.text = tapId ?? extractText(rawMessage);
+    const parsed = tapId
+      ? parseNativeFlowCommand(tapId, botConfig.prefix)
+      : parseCommand(this.text, botConfig.prefix);
     this.command = parsed.command;
     this.args = parsed.args;
 
@@ -285,6 +311,256 @@ export class Context {
       { poll: { name, values: options, selectableCount } },
       { quoted: this.raw, ...opts }
     );
+  }
+
+  /** Send a sticker pack (multiple stickers grouped together). */
+  async sendStickerPack({ name, publisher, description, stickers, cover }, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.send(
+      makeStickerPack({ name, publisher, description, stickers, cover }),
+      { ...(quoted === false ? {} : { quoted: this.raw }), ...rest }
+    );
+  }
+
+  // ── Interactive (native flow) messages ────────────────────────────────
+
+  /**
+   * Send native-flow buttons (quick reply / open URL / copy code).
+   * Accepts either the raw `{ name, buttonParamsJson }` shape from the core,
+   * or a friendlier shorthand per button:
+   *   { type: "reply", text, id }
+   *   { type: "url",   text, url }
+   *   { type: "copy",  text, code }
+   *
+   * Routed through `content.interactiveButtons` (not `interactiveMessage`)
+   * — that's the path the core wraps with the `messageSecret` that WhatsApp
+   * needs to recognize a tap as a real interactive response. Without it,
+   * `quick_reply`/`cta_url`/`cta_copy` taps silently fall back to a plain
+   * text reply on the recipient's end and never reach your bot.
+   * @param {{ title?: string, subtitle?: string, footer?: string, header?: string, image?, video?, document? }} content
+   *   `title` is the main body text; `header` is the small line above it
+   *   (matches what `interactiveMessage.title`/`.header` rendered as before).
+   * @param {Array<object>} buttons
+   */
+  async sendButtons(content, buttons, opts = {}) {
+    const { title, subtitle, footer, header, image, video, document, mimetype, jpegThumbnail } = content;
+    return this.send(
+      {
+        text: title,
+        subtitle,
+        footer,
+        title: header,
+        ...(image ? { image: resolveMediaSource(image) } : {}),
+        ...(video ? { video: resolveMediaSource(video) } : {}),
+        ...(document ? { document: resolveMediaSource(document) } : {}),
+        mimetype,
+        jpegThumbnail,
+        interactiveButtons: buttons.map(normalizeButton),
+      },
+      { quoted: this.raw, ...opts }
+    );
+  }
+
+  /**
+   * Send a WhatsApp list menu (native `single_select` interactive message).
+   *
+   * Unlike `sendButtons()`, this stays on the plain `interactiveMessage`
+   * path (no `messageSecret` wrapping) — `single_select` list-row taps are
+   * recognized fine without it, so there's no need for the extra wrapping.
+   * @param {{ title?, footer?, header?, buttonText? }} content
+   * @param {Array<{ title: string, rows: Array<{ title, id, description? }> }>} sections
+   */
+  async sendListMenu(content, sections, opts = {}) {
+    const { title, footer, header, buttonText = "Menu" } = content;
+    return this.send(
+      {
+        interactiveMessage: {
+          title,
+          footer,
+          header,
+          buttons: [
+            {
+              name: "single_select",
+              buttonParamsJson: JSON.stringify({ title: buttonText, sections }),
+            },
+          ],
+        },
+      },
+      { quoted: this.raw, ...opts }
+    );
+  }
+
+  // ── Albums ─────────────────────────────────────────────────────────────
+
+  /**
+   * Send an album (multiple images/videos grouped into one gallery message).
+   * @param {Array<{ image?: any, video?: any, caption?: string }>} items
+   */
+  async sendAlbum(items, opts = {}) {
+    const { quoted, ...rest } = opts;
+    const album = items.map((item) => {
+      const out = { ...item };
+      if (out.image) out.image = resolveMediaSource(out.image);
+      if (out.video) out.video = resolveMediaSource(out.video);
+      return out;
+    });
+    return this.send(
+      { albumMessage: album },
+      { ...(quoted === false ? {} : { quoted: this.raw }), ...rest }
+    );
+  }
+
+  // ── AI-style rich responses (table / list / code / link) ───────────────
+
+  /** Rich table (V1). `headers`: string[]; `rows`: string[][]. */
+  async sendTable(title, headers, rows, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.sock.sendTable(
+      this.from,
+      title,
+      headers,
+      rows,
+      quoted === false ? undefined : this.raw,
+      rest
+    );
+  }
+
+  /**
+   * Rich table (V2, unified-response protocol).
+   * `table`: [title, "col1 | col2 | ...", "r1c1 | r1c2;;r2c1 | r2c2"]
+   */
+  async sendTableV2(table, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.sock.sendTableV2(
+      this.from,
+      table,
+      quoted === false ? undefined : this.raw,
+      rest
+    );
+  }
+
+  /** Rich key/value list (no heading). `items`: Array<[label, value]> or string[]. */
+  async sendRichList(title, items, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.sock.sendList(
+      this.from,
+      title,
+      items,
+      quoted === false ? undefined : this.raw,
+      rest
+    );
+  }
+
+  /** Rich code block (V1, basic highlighting). Languages: javascript, typescript, python. */
+  async sendCodeBlock(code, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.sock.sendCodeBlock(
+      this.from,
+      code,
+      quoted === false ? undefined : this.raw,
+      rest
+    );
+  }
+
+  /** Rich code block (V2, unified-response protocol). Languages: javascript, python, go, lua, bash. */
+  async sendCodeBlockV2(code, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.sock.sendCodeBlockV2(
+      this.from,
+      code,
+      quoted === false ? undefined : this.raw,
+      rest
+    );
+  }
+
+  /** Rich inline-link text using `{{IE_N}}display{{/IE_N}}` placeholders. `links`: string[] of URLs, matched by index N. */
+  async sendLink(text, links, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.sock.sendLink(
+      this.from,
+      text,
+      links,
+      quoted === false ? undefined : this.raw,
+      rest
+    );
+  }
+
+  /** Rich inline-link text, search-result style. `links`: Array<{ url, displayName?, sourceDisplayName?, sourceSubtitle? }>. */
+  async sendLinkV2(text, links, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.sock.sendLinkV2(
+      this.from,
+      text,
+      links,
+      quoted === false ? undefined : this.raw,
+      rest
+    );
+  }
+
+  /**
+   * Send a mixed rich message built from raw submessages (text/table/code/
+   * image/etc — see `RichSubMessageType` for the numeric `messageType`s).
+   */
+  async sendRichMessage(submessages, opts = {}) {
+    const { quoted, ...rest } = opts;
+    return this.sock.sendRichMessage(
+      this.from,
+      submessages,
+      quoted === false ? undefined : this.raw,
+      rest
+    );
+  }
+
+  // ── Other message types ───────────────────────────────────────────────
+
+  /** Send a payment request. */
+  async sendPayment({ amount, currency, note, from }, opts = {}) {
+    return this.send(
+      { requestPaymentMessage: { amount, currency, note, from } },
+      { quoted: this.raw, ...opts }
+    );
+  }
+
+  /** Send a calendar event invite. */
+  async sendEvent({ name, description, startTime, endTime, location }, opts = {}) {
+    return this.send(
+      { eventMessage: { name, description, startTime, endTime, location } },
+      { quoted: this.raw, ...opts }
+    );
+  }
+
+  /** Send poll results (final tally, shown like WhatsApp's own poll-result summary). */
+  async sendPollResult({ name, votes }, opts = {}) {
+    return this.send(
+      { pollResultMessage: { name, pollVotes: votes } },
+      { quoted: this.raw, ...opts }
+    );
+  }
+
+  /** Send a catalog product card. */
+  async sendProduct(product, opts = {}) {
+    const { thumbnail, ...rest } = product;
+    return this.send(
+      {
+        productMessage: {
+          ...rest,
+          ...(thumbnail ? { thumbnail: resolveMediaSource(thumbnail) } : {}),
+        },
+      },
+      { quoted: this.raw, ...opts }
+    );
+  }
+
+  /**
+   * Post a WhatsApp Status (story) update that @mentions specific contacts,
+   * so it shows up highlighted for them. Unlike the other `send*()` methods
+   * this doesn't go to `ctx.from` — a Status isn't posted "in" a chat, it's
+   * broadcast, visible only to the given `jids` (must be your contacts).
+   * @param {object} content  Same shape as `sock.sendMessage`'s content, e.g. `{ text }` or `{ image }`.
+   * @param {string[]} jids  Contacts (and/or groups) who should see it highlighted.
+   */
+  async sendStatusMention(content, jids) {
+    return this.sock.sendStatusMention(content, jids);
   }
 
   // ── Media download ────────────────────────────────────────────────────
@@ -451,6 +727,35 @@ export class Context {
   }
 }
 
+/**
+ * Normalizes one button for `ctx.sendButtons()`. Passes through the raw
+ * `{ name, buttonParamsJson }` shape untouched; converts the friendly
+ * shorthand (`{ type: "reply"|"url"|"copy", ... }`) into that shape.
+ */
+function normalizeButton(button) {
+  if (button.name && button.buttonParamsJson) return button;
+
+  switch (button.type) {
+    case "reply":
+      return {
+        name: "quick_reply",
+        buttonParamsJson: JSON.stringify({ display_text: button.text, id: button.id }),
+      };
+    case "url":
+      return {
+        name: "cta_url",
+        buttonParamsJson: JSON.stringify({ display_text: button.text, url: button.url }),
+      };
+    case "copy":
+      return {
+        name: "cta_copy",
+        buttonParamsJson: JSON.stringify({ display_text: button.text, copy_code: button.code }),
+      };
+    default:
+      throw new Error(`Unknown button type: "${button.type}". Use "reply", "url", or "copy".`);
+  }
+}
+
 function isLid(jid) {
   return typeof jid === "string" && jid.endsWith("@lid");
 }
@@ -475,6 +780,7 @@ function extractText(msg) {
     m.imageMessage?.caption ??
     m.videoMessage?.caption ??
     m.documentMessage?.caption ??
+    extractNativeFlowId(m.interactiveResponseMessage) ??
     ""
   );
 }
@@ -485,6 +791,19 @@ function parseCommand(text, prefix) {
   }
   const [command, ...args] = text.slice(prefix.length).trim().split(/\s+/);
   return { command: command?.toLowerCase() ?? null, args };
+}
+
+/**
+ * Same idea as `parseCommand()`, but for native-flow button/list-row ids
+ * (`ctx.buttonReply.id` / `ctx.listReply.id`). These don't need to start
+ * with the prefix to count as a command — strips it if present, uses the
+ * id as-is otherwise.
+ */
+function parseNativeFlowCommand(id, prefix) {
+  if (!id) return { command: null, args: [] };
+  const stripped = id.startsWith(prefix) ? id.slice(prefix.length) : id;
+  const [command, ...args] = stripped.trim().split(/\s+/);
+  return { command: command?.toLowerCase() || null, args };
 }
 
 /** Turns a protocolMessage's numeric `type` into a friendly description. */

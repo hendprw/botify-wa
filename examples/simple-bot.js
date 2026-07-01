@@ -124,6 +124,107 @@ bot.command(
   { description: "Edit the triggering message (only works on the bot's own messages)" }
 );
 
+// ── Interactive / rich messages (new) ─────────────────────────────────────────
+
+bot.command(
+  "buttons",
+  async (ctx) => {
+    await ctx.sendButtons(
+      { title: "Welcome!", footer: "Powered by Botify" },
+      [
+{ type: "reply", text: "Menu", id: `${bot.options.prefix}menu` },
+        { type: "url", text: "Website", url: "https://example.com" },
+        { type: "copy", text: "Copy Code", code: "BOTIFY2024" },
+      ]
+    );
+  },
+  { description: "Send example native-flow buttons" }
+);
+
+bot.command(
+  "listmenu",
+  async (ctx) => {
+    await ctx.sendListMenu(
+      { title: "Bot Menu", footer: "Powered by Botify", buttonText: "Open Menu" },
+      [
+        {
+          title: "Games",
+          rows: [
+            { title: "Quiz", id: `${bot.options.prefix}quiz` },
+            { title: "Roll a die", id: `${bot.options.prefix}roll` },
+          ],
+        },
+        {
+          title: "Tools",
+          rows: [
+            { title: "Sticker", id: `${bot.options.prefix}sticker` },
+            { title: "Save media", id: `${bot.options.prefix}save` },
+          ],
+        },
+      ]
+    );
+  },
+  { description: "Send an example WhatsApp list menu" }
+);
+
+// Reply to two images with "!album" to group them into one gallery message.
+bot.command(
+  "album",
+  async (ctx) => {
+    if (ctx.type !== "image" || !ctx.quoted || ctx.quoted.type !== "image") {
+      return ctx.reply("Reply to an image with !album, while quoting another image.");
+    }
+    const [first, second] = await Promise.all([
+      ctx.download(),
+      ctx.quoted.download(),
+    ]);
+    await ctx.sendAlbum([
+      { image: first, caption: "First" },
+      { image: second, caption: "Second" },
+    ]);
+  },
+  { description: "Group two images (this + the one you replied to) into an album" }
+);
+
+bot.command(
+  "table",
+  async (ctx) => {
+    await ctx.sendTable(
+      "Java vs JavaScript",
+      ["Feature", "Java", "JavaScript"],
+      [
+        ["Type", "Compiled", "Interpreted"],
+        ["Typing", "Static", "Dynamic"],
+      ],
+      { headerText: "Comparison:", footer: "Hope this helps!" }
+    );
+  },
+  { description: "Send an example rich table" }
+);
+
+bot.command(
+  "codeblock",
+  async (ctx) => {
+    await ctx.sendCodeBlock(
+      `function sayHello(name) {\n  return "Hello, " + name;\n}`,
+      { language: "javascript", title: "Example Code", footer: "Powered by Botify" }
+    );
+  },
+  { description: "Send an example rich code block" }
+);
+
+bot.command(
+  "link",
+  async (ctx) => {
+    await ctx.sendLink(
+      "Check this out: {{IE_0}}the Botify repo{{/IE_0}}",
+      ["https://github.com/example/botify-wa"],
+      { headerText: "🔗 Link", footer: "✨ Done!" }
+    );
+  },
+  { description: "Send an example rich inline link" }
+);
+
 // Demonstrates centralized error handling.
 bot.command("crash", async () => {
   throw new Error("boom — something went wrong inside the handler");

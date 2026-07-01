@@ -21,3 +21,25 @@ export {
   useMultiFileAuthState,
   Dugong,
 } from "../vendor/core/lib/index.js";
+
+// Rich-message re-exports (advanced use — Context's send* methods wrap
+// these already; grab these directly if you need to build content by hand,
+// e.g. outside of a Context, in a cron job, or for sock.sendMessage()).
+export {
+  makeStickerPack,
+  RichSubMessageType,
+  CodeHighlightType,
+  tokenizeCode,
+  tokenizeCodeV2,
+  generateTableContent,
+  generateTableContentV2,
+  toTableMetadataV2,
+  generateListContent,
+  generateCodeBlockContent,
+  generateCodeBlockContentV2,
+  generateLinkContent,
+  generateLinkContentV2,
+  generateRichMessageContent,
+  generateUnifiedResponseContent,
+  captureUnifiedResponse,
+} from "../vendor/core/lib/index.js";

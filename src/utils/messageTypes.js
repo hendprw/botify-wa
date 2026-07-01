@@ -107,6 +107,25 @@ export function extractPlainText(rawMessageContent) {
     normalized.buttonsResponseMessage?.selectedDisplayText ??
     normalized.listResponseMessage?.title ??
     normalized.templateButtonReplyMessage?.selectedDisplayText ??
+    extractNativeFlowId(normalized.interactiveResponseMessage) ??
     ""
   );
+}
+
+/**
+ * Native-flow buttons/list menus (`interactiveMessage`, sent via
+ * `ctx.sendButtons()` / `ctx.sendListMenu()`) don't reply with a
+ * `selectedDisplayText` — WhatsApp echoes back an `interactiveResponseMessage`
+ * whose `nativeFlowResponseMessage.paramsJson` is a JSON string containing
+ * the tapped button/row's `id`. This pulls that `id` out (or `null` if the
+ * message isn't a native-flow response, or the JSON is malformed).
+ */
+export function extractNativeFlowId(interactiveResponseMessage) {
+  const paramsJson = interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;
+  if (!paramsJson) return null;
+  try {
+    return JSON.parse(paramsJson)?.id ?? null;
+  } catch {
+    return null;
+  }
 }
