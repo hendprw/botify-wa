@@ -1,16 +1,11 @@
-import makeWASocket, {
-  DisconnectReason,
-  useMultiFileAuthState,
-} from "../vendor/core/lib/index.js";
-import qrcode from "qrcode-terminal";
-import pino   from "pino";
 import { PluginManager }         from "./PluginManager.js";
-import { Context }               from "./Context.js";
 import { loadConfig, mergeConfig } from "./config/index.js";
-import { logger }    from "./middlewares/logger.js";
-import { cooldown }  from "./middlewares/cooldown.js";
-import { permission } from "./middlewares/permission.js";
-import { antiSpam }  from "./middlewares/antiSpam.js";
+import {
+  registerBuiltinsMethods,
+  connectionMethods,
+  dispatchMethods,
+  reconnectMethods,
+} from "./bot/index.js";
 
 /**
  * Bot
@@ -27,6 +22,13 @@ import { antiSpam }  from "./middlewares/antiSpam.js";
  *
  * Everything low-level (encryption, sockets, WA protocol) lives in
  * vendor/core — Botify only adds structure on top.
+ *
+ * This class itself only owns construction + the public API + the small
+ * `_emit`/`_handleError` glue shared by every mixin below — the actual
+ * connection lifecycle, message dispatch, built-in middleware setup, and
+ * reconnect backoff are organized by concern into `./bot/*.js` and mixed
+ * onto the prototype below. See `./bot/index.js` for the full map of
+ * which file owns which methods.
  */
 export class Bot {
   /**
@@ -116,48 +118,8 @@ export class Bot {
     this._reconnectTimer    = null;
 
     // ── 2. Register built-in middlewares in the correct order ────────────────
-    //
-    //  Order matters:
-    //    1. logger      — log first so every attempt is recorded, even blocked ones
-    //    2. antiSpam    — global rate limit before any per-command check
-    //    3. permission  — owner / admin gate
-    //    4. cooldown    — per-user per-command throttle
-    //    (user middlewares added via bot.use() run after all of the above)
-
-    this.plugins.use(
-      logger({
-        enabled: this.options.logger.enabled,
-        showPn:  this.options.logger.showPn,
-        logFn:   this.options.logger.logFn,
-        format:  this.options.logger.format,
-      })
-    );
-
-    if (this.options.antiSpam.enabled) {
-      this.plugins.use(
-        antiSpam({
-          windowMs:    this.options.antiSpam.windowMs,
-          maxMessages: this.options.antiSpam.maxMessages,
-          message:     this.options.antiSpam.message,
-        })
-      );
-    }
-
-    this.plugins.use(
-      permission({
-        ownerMessage: this.options.permissionMessages.owner,
-        adminMessage:  this.options.permissionMessages.admin,
-        emitEvent: (ctx, reason) => this._emit("noPermission", ctx, reason),
-      })
-    );
-
-    this.plugins.use(
-      cooldown({
-        defaultCooldown: this.options.defaultCooldown,
-        message:         this.options.cooldownMessage,
-        emitEvent: (ctx, remainingMs) => this._emit("cooldown", ctx, remainingMs),
-      })
-    );
+    // (logger → antiSpam → permission → cooldown; see ./bot/register-builtins.js)
+    this._registerBuiltinMiddlewares();
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -200,7 +162,7 @@ export class Bot {
     return this;
   }
 
-  // ── Internals ──────────────────────────────────────────────────────────────
+  // ── Internals shared by every ./bot/*.js mixin ────────────────────────────
 
   _emit(event, ...args) {
     for (const fn of this._listeners.get(event) ?? []) fn(...args);
@@ -219,109 +181,14 @@ export class Bot {
       }
     }
   }
-
-  /** Boot the bot: load/create session, connect, wire up listeners. */
-  async start() {
-    if (this._reconnectTimer) {
-      clearTimeout(this._reconnectTimer);
-      this._reconnectTimer = null;
-    }
-
-    const { state, saveCreds } = await useMultiFileAuthState(
-      this.options.sessionPath
-    );
-
-    const logger_ =
-      this.options.socketConfig.logger ??
-      pino({ level: this.options.logLevel });
-
-    this.sock = makeWASocket({
-      auth: state,
-      ...this.options.socketConfig,
-      logger: logger_,
-    });
-
-    this.sock.ev.on("creds.update", saveCreds);
-
-    this.sock.ev.on("connection.update", (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        if (this.options.printQR) {
-          qrcode.generate(qr, { small: true });
-          console.log("Scan the QR code above with WhatsApp (Linked Devices).");
-        }
-        this._emit("qr", qr);
-      }
-
-      if (connection === "open") {
-        this._reconnectAttempts = 0;
-        this._emit("ready", this.sock);
-      }
-
-      if (connection === "close") {
-        const statusCode     = lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-        if (shouldReconnect) {
-          const delay = Math.min(
-            this.options.reconnectBaseDelay * 2 ** this._reconnectAttempts,
-            this.options.reconnectMaxDelay
-          );
-          this._reconnectAttempts++;
-
-          this._emit("disconnect", {
-            statusCode,
-            willReconnect: true,
-            reconnectDelayMs: delay,
-            attempt: this._reconnectAttempts,
-          });
-
-          this._reconnectTimer = setTimeout(() => this.start(), delay);
-        } else {
-          this._emit("disconnect", { statusCode, willReconnect: false });
-        }
-      }
-    });
-
-    this.sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      if (type !== "notify") return;
-
-      for (const raw of messages) {
-        if (!raw.message) continue;
-
-        const ctx = new Context(this.sock, raw, {
-          prefix: this.options.prefix,
-          owners: this.options.owners,
-        });
-
-        this._emit("message", ctx);
-
-        if (!ctx.command) continue;
-
-        const result = await this.plugins.dispatch(ctx.command, ctx);
-
-        switch (result.status) {
-          case "not_found":
-            this._emit("unknownCommand", ctx);
-            break;
-          case "error":
-            await this._handleError(result.error, ctx);
-            break;
-          // "ok" and "stopped" need no further action
-        }
-      }
-    });
-
-    return this.sock;
-  }
-
-  /** Gracefully close the socket. */
-  async stop() {
-    if (this._reconnectTimer) {
-      clearTimeout(this._reconnectTimer);
-      this._reconnectTimer = null;
-    }
-    await this.sock?.end?.(undefined);
-  }
 }
+
+// ── Assemble the prototype from focused, single-purpose mixins ───────────
+// Order is presentation-only; grouping mirrors the file layout under ./bot/.
+Object.assign(
+  Bot.prototype,
+  registerBuiltinsMethods, // _registerBuiltinMiddlewares
+  connectionMethods,       // start, stop, _handleConnectionUpdate
+  dispatchMethods,         // _handleMessagesUpsert, _dispatchIncoming
+  reconnectMethods,        // _handleDisconnect, _nextReconnectDelay, _clearReconnectTimer
+);
