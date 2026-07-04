@@ -5,6 +5,8 @@
 Di atas core tersebut, Botify menambahkan struktur yang benar-benar dibutuhkan hampir semua bot:
 
 - **Sistem command** — `bot.command("ping", handler)`, tanpa perlu parsing manual event koneksi mentah
+- **Sub-command** — `bot.command("admin", handler, { admin: true }).sub("ban", banHandler)` untuk pola `!admin ban`, `!admin kick`, dengan pewarisan `owner`/`admin`/`cooldown` dari command induknya
+- **Kategori command** — `opts.category` untuk grouping command, dibaca otomatis oleh template `!menu`
 - **Middleware** — `bot.use(fn)`
 - **Objek `Context`** yang ramah pakai — `ctx.reply()`, `ctx.args`, `ctx.sender`, dst — menggantikan objek pesan mentah
 - **Penanganan pesan lengkap** — setiap tipe pesan sudah diklasifikasikan (`ctx.type`: teks, gambar, video, audio/voice note, stiker, dokumen, kontak, lokasi, poll, balasan tombol/list, undangan grup, edit/hapus, dan lainnya), dengan pembongkaran otomatis untuk pesan *ephemeral*/*view-once*
@@ -101,7 +103,7 @@ npx botify-wa help               # tampilkan bantuan
 npx botify-wa version            # tampilkan versi framework
 ```
 
-Perintah `build` akan menyalin template dari `src/templates/` (termasuk contoh plugin `ping`, `info`, `menu`, dan `config.bt`) ke folder proyek baru. Aman dijalankan berulang kali — file yang sudah ada tidak akan ditimpa.
+Perintah `build` akan menyalin template dari `src/templates/` (termasuk contoh plugin `ping`, `info`, `menu`, `admin`, dan `config.bt`) ke folder proyek baru. Aman dijalankan berulang kali — file yang sudah ada tidak akan ditimpa.
 
 ## Konfigurasi (`config.bt`)
 
@@ -165,9 +167,25 @@ Semua key bersifat opsional — key yang tidak diisi otomatis memakai nilai defa
 
 | Method | Deskripsi |
 |---|---|
-| `bot.command(name, handler, opts?)` | Mendaftarkan command. `handler` menerima sebuah [`Context`](#context). `opts.aliases` dan `opts.description` opsional. |
+| `bot.command(name, handler, opts?)` | Mendaftarkan command. `handler` menerima sebuah [`Context`](#context). `opts.aliases`, `opts.description`, `opts.category` (grouping untuk `!menu`), `opts.cooldown`, `opts.owner`, `opts.admin` semuanya opsional. Mengembalikan `CommandBuilder` — chain `.sub()` untuk sub-command (lihat di bawah), atau abaikan return value-nya kalau tidak butuh. |
 | `bot.use(fn)` | Mendaftarkan middleware yang berjalan sebelum setiap dispatch command. `return false` untuk menghentikan chain. |
 | `bot.on(event, handler)` | Event level-framework: `"ready"`, `"message"` (setiap pesan masuk, command maupun bukan), `"disconnect"`, `"unknownCommand"`. |
+
+**Sub-command**
+
+`bot.command()` mengembalikan `CommandBuilder`, yang punya method `.sub(name, handler, opts?)` untuk mendaftarkan sub-command bertingkat (`!admin ban`, `!admin kick`):
+
+```js
+bot.command("admin", async (ctx) => {
+  await ctx.reply("Gunakan: !admin ban @user atau !admin kick @user");
+}, { category: "Admin", admin: true }) // admin: true berlaku juga untuk sub di bawah
+  .sub("ban",  async (ctx) => { /* ... */ }, { description: "Ban member" })
+  .sub("kick", async (ctx) => { /* ... */ }, { description: "Kick member", cooldown: 10_000 });
+```
+
+Sub-command **mewarisi** `owner`/`admin`/`cooldown` dari command induknya, kecuali di-set ulang sendiri di `opts` milik sub tersebut (lihat `kick` yang override cooldown di atas). Di dalam handler, `ctx.args` sudah otomatis dipotong melewati nama sub-command (`!admin ban 628xxx` → `ctx.args` berisi `["628xxx"]`), dan `ctx.subcommand` berisi nama sub yang cocok (`"ban"`) atau `null` kalau tidak ada sub yang match.
+
+> ⚠️ **Breaking change kecil**: sebelumnya `bot.command()` mengembalikan `this` (Bot), sehingga bisa dirangkai `bot.command().command()`. Sekarang ia mengembalikan `CommandBuilder`, jadi pola chaining itu tidak berlaku lagi — panggil `bot.command()` lagi sebagai statement terpisah (semua template bawaan sudah memakai pola ini).
 
 ### `Context`
 
@@ -182,7 +200,14 @@ Semua key bersifat opsional — key yang tidak diisi otomatis memakai nilai defa
 | `ctx.type` | Tipe pesan (lihat di bawah) |
 | `ctx.mentions` / `ctx.isMentioned(jid)` | JID yang di-*mention* dalam pesan |
 | `ctx.quoted` | Pesan yang sedang dibalas, sebagai [`Quoted`](#quoted) — atau `null` |
+| `ctx.repliedToBot` | `true` kalau `ctx.quoted` adalah pesan yang dikirim bot sendiri |
 | `ctx.isOwner` / `ctx.pushName` | Apakah pengirim terdaftar di `owners`, dan nama tampilannya |
+| `ctx.id` | ID unik pesan ini (`key.id`) — untuk dedup/logging eksternal |
+| `ctx.timestamp` | Waktu pesan dikirim, unix timestamp dalam **detik** (`null` kalau tidak ada) |
+| `ctx.botJid` | JID bot sendiri (suffix device sudah dibersihkan), `null` sebelum tersambung |
+| `ctx.isForwarded` / `ctx.forwardingScore` | Apakah pesan ditandai *forwarded*, dan sudah berapa kali di-forward |
+| `ctx.expiration` | Durasi *disappearing message* chat ini dalam detik (`0` = nonaktif) |
+| `ctx.raw` | Objek `WebMessageInfo` mentah dari core — *escape hatch* kalau butuh field yang belum dibungkus Botify |
 
 **Tipe pesan** — `ctx.type` salah satu dari: `text`, `image`, `video`, `audio` (`ctx.isPtt` untuk voice note), `sticker`, `document`, `contact`, `contacts`, `location`, `liveLocation`, `poll`, `pollUpdate`, `reaction`, `buttonsResponse`, `listResponse`, `templateButtonReply`, `interactiveResponse`, `groupInvite`, `product`, `event`, `protocol` (edit/hapus — lihat `ctx.protocol.kind`), `unsupported`, `unknown`. Pembungkus *ephemeral* dan *view-once* dibongkar otomatis, jadi `ctx.type` selalu mencerminkan isi pesan yang sesungguhnya.
 
@@ -237,11 +262,11 @@ Field khusus per tipe terisi otomatis: `ctx.mimetype`, `ctx.caption`, `ctx.fileN
 | `ctx.star(starred?)` | Star/unstar pesan pemicu |
 | `ctx.forward(toJid, opts?)` | Teruskan pesan pemicu ke chat lain |
 
-**Helper grup**: `ctx.isGroupAdmin()`, `ctx.getGroupName()`, `ctx.describeChat()`.
+**Helper grup**: `ctx.isGroupAdmin()`, `ctx.isBotAdmin()` (apakah bot sendiri admin grup ini), `ctx.groupAdmins()` (array JID semua admin grup), `ctx.getGroupName()`, `ctx.describeChat()`.
 
 ### `Quoted`
 
-`ctx.quoted` (jika ada) mencerminkan bagian-bagian relevan dari `Context` untuk pesan yang sedang dibalas: `type`, `text`, `mimetype`, `caption`, `isMedia`, `sender`/`senderNumber`, ditambah `.download()`, `.saveMedia(path)`, `.react(emoji)`, dan `.delete()`. Berguna untuk command bergaya "reply gambar dengan `!sticker`":
+`ctx.quoted` (jika ada) mencerminkan bagian-bagian relevan dari `Context` untuk pesan yang sedang dibalas: `type`, `text`, `mimetype`, `caption`, `isMedia`, `sender`/`senderNumber`, `fromMe` (juga tersedia sebagai `ctx.repliedToBot`), ditambah `.download()`, `.saveMedia(path)`, `.react(emoji)`, dan `.delete()`. Berguna untuk command bergaya "reply gambar dengan `!sticker`":
 
 ```js
 bot.command("sticker", async (ctx) => {

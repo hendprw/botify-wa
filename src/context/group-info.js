@@ -39,6 +39,41 @@ export const groupInfoMethods = {
   },
 
   /**
+   * Whether the *bot itself* is an admin (or superadmin) of the current
+   * group. Always `false` outside of groups. Handy as a guard before
+   * actions that require it, e.g. `ctx.deleteMessage()`/`kick` on someone
+   * else's message, or `ctx.pin()` in some group settings:
+   *
+   *   if (!(await ctx.isBotAdmin())) return ctx.reply("Bot harus jadi admin dulu.");
+   */
+  async isBotAdmin() {
+    const metadata = await this._getGroupMetadata();
+    if (!metadata || !this.botJid) return false;
+
+    const participant = metadata.participants.find((p) => p.id === this.botJid);
+    return (
+      !!participant &&
+      (participant.admin === "admin" || participant.admin === "superadmin")
+    );
+  },
+
+  /**
+   * All admin (and superadmin) JIDs in the current group, as a plain
+   * array. Returns `[]` outside of groups or if metadata couldn't be
+   * fetched. Handy for "notify all admins" / "mention all admins" style
+   * commands.
+   * @returns {Promise<string[]>}
+   */
+  async groupAdmins() {
+    const metadata = await this._getGroupMetadata();
+    if (!metadata) return [];
+
+    return metadata.participants
+      .filter((p) => p.admin === "admin" || p.admin === "superadmin")
+      .map((p) => p.id);
+  },
+
+  /**
    * The current group's display name (its "subject"). Returns `null`
    * outside of groups or if metadata couldn't be fetched.
    */

@@ -1,6 +1,6 @@
 {
   "name": "botify-wa",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "description": "Lightweight WhatsApp bot framework with plugin system, built-in middlewares, and CLI scaffolding.",
   "main": "src/index.js",
   "type": "module",
