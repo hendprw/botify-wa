@@ -41,6 +41,8 @@ export class Quoted {
 
     this.sender = participant;
     this.senderNumber = participantId || "";
+    /** True if the bot itself sent the message being quoted. */
+    this.fromMe = this.raw.key.fromMe;
 
     const { type, key, content } = detectMessageType(contextInfo.quotedMessage);
     this.type = type;

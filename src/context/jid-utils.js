@@ -27,3 +27,16 @@ export function detectChatType(jid) {
   if (jid.endsWith("@broadcast")) return "broadcast";
   return "private";
 }
+
+/**
+ * Strips the device suffix (":12") that WhatsApp appends to a bot's own
+ * JID (`sock.user.id`), e.g. "628xxx:12@s.whatsapp.net" → "628xxx@s.whatsapp.net".
+ * Other JIDs (senders, chats) never carry this suffix, so it's only needed
+ * for `sock.user.id` — kept here anyway since it's still "just JID shape".
+ * @param {string | null | undefined} jid
+ * @returns {string | null}
+ */
+export function normalizeJid(jid) {
+  if (!jid) return null;
+  return jid.replace(/:\d+(?=@)/, "");
+}

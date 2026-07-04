@@ -14,7 +14,7 @@
 import { proto } from "../../vendor/core/lib/index.js";
 import { detectMessageType, isMediaType, extractNativeFlowId } from "../utils/messageTypes.js";
 import { Quoted } from "../Quoted.js";
-import { isLid, isPn, detectChatType } from "./jid-utils.js";
+import { isLid, isPn, detectChatType, normalizeJid } from "./jid-utils.js";
 import { parseCommand, parseNativeFlowCommand } from "./command-parsing.js";
 
 /**
@@ -39,6 +39,22 @@ export function deriveMessageState(sock, rawMessage, botConfig) {
   state.sender =
     key.participant || key.remoteJid || key.participantAlt || key.remoteJidAlt || "";
   state.fromMe = !!key.fromMe;
+
+  /** This message's own id (`key.id`) — e.g. for external dedup/logging. */
+  state.id = key.id ?? null;
+
+  /**
+   * When this message was sent, as a unix timestamp in **seconds** (matches
+   * WhatsApp's own convention). `messageTimestamp` can come back as a
+   * plain number or a Long-like object depending on the transport, so it's
+   * normalized here — `null` if missing.
+   */
+  state.timestamp = rawMessage.messageTimestamp != null
+    ? Number(rawMessage.messageTimestamp)
+    : null;
+
+  /** The bot's own JID (device suffix stripped), or null if not connected yet. */
+  state.botJid = normalizeJid(sock?.user?.id);
 
   /**
    * Kind of chat this message came from:
@@ -98,10 +114,24 @@ export function deriveMessageState(sock, rawMessage, botConfig) {
   /** JIDs explicitly @mentioned in this message. */
   state.mentions = contextInfo?.mentionedJid ?? [];
 
+  /** Whether WhatsApp's client marked this message as forwarded. */
+  state.isForwarded = !!contextInfo?.isForwarded;
+  /** How many times this content has been forwarded (0 if not forwarded). */
+  state.forwardingScore = contextInfo?.forwardingScore ?? 0;
+  /**
+   * Disappearing-message timer for this chat, in seconds (0 = disabled).
+   * Present even on messages that aren't themselves ephemeral, since it
+   * describes the chat setting at send time.
+   */
+  state.expiration = contextInfo?.expiration ?? 0;
+
   /** The message this one is replying to, or null. See Quoted.js. */
   state.quoted = contextInfo?.quotedMessage
     ? new Quoted(sock, state.from, contextInfo)
     : null;
+
+  /** True when the message being replied to was sent by the bot itself. */
+  state.repliedToBot = state.quoted?.fromMe ?? false;
 
   // ── Type-specific convenience fields ──────────────────────────────────
   Object.assign(state, deriveTypeSpecificFields(type, state._content));

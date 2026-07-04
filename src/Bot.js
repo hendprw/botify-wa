@@ -124,10 +124,27 @@ export class Bot {
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
-  /** Register a command. Shortcut for bot.plugins.command(...) */
+  /**
+   * Register a command. Shortcut for bot.plugins.command(...).
+   *
+   * Returns a `CommandBuilder`, not the `Bot` instance — chain `.sub()` on
+   * it to add nested sub-commands (`!admin ban`, `!admin kick`):
+   *
+   *   bot.command("admin", adminHandler, { admin: true })
+   *     .sub("ban",  banHandler)
+   *     .sub("kick", kickHandler);
+   *
+   * Sub-commands inherit `owner`/`admin`/`cooldown` from the parent unless
+   * they override it themselves. `opts.category` groups commands for the
+   * built-in `!menu` template (e.g. `{ category: "Media" }`).
+   *
+   * Note: this used to return `this` (the `Bot`) for `.command().command()`
+   * chaining — call `bot.command()` again as a separate statement instead
+   * (every built-in template already does it this way).
+   * @returns {import('./PluginManager.js').CommandBuilder}
+   */
   command(name, handler, opts) {
-    this.plugins.command(name, handler, opts);
-    return this;
+    return this.plugins.command(name, handler, opts);
   }
 
   /**
