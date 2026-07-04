@@ -280,6 +280,45 @@ bot.command(
   { description: "Send a rank/level card with zero media download cost" }
 );
 
+// ctx.sendCard() — a link-preview-style card. Needs a visible `url` (WA only
+// renders the preview box when the message text contains a matching link),
+// but in exchange the thumbnail defaults to `highQuality: true`: it's
+// uploaded to WA's media CDN the same way WhatsApp's own client does for
+// real link previews, so it comes out sharp/full-res instead of the old
+// ~192px, quality-50 embedded-only thumbnail. Costs one extra upload
+// round-trip at send time.
+bot.command(
+  "sendcard",
+  async (ctx) => {
+    await ctx.sendCard({
+      title: "Botify WA",
+      description: "Framework WhatsApp bot yang ringan dan modular.",
+      thumbnail: "https://placehold.co/800x800.jpg", // swap for a real image
+      url: "https://github.com",
+    });
+  },
+  { description: "Send a sharp, CDN-backed link-preview card (highQuality: true by default)" }
+);
+
+// Same card, but with highQuality: false — old behavior, zero network
+// round-trip, instant send, but capped at ~300px/quality-50 → visibly
+// blurrier. Useful if you're sending a LOT of these and want to skip the
+// extra upload latency, or you're offline-tolerant and don't want a failed
+// upload to add delay.
+bot.command(
+  "sendcardlq",
+  async (ctx) => {
+    await ctx.sendCard({
+      title: "Botify WA",
+      description: "Framework WhatsApp bot yang ringan dan modular.",
+      thumbnail: "https://placehold.co/800x800.jpg",
+      url: "https://github.com",
+      highQuality: false,
+    });
+  },
+  { description: "Same as !sendcard but forced low-res/embedded-only (highQuality: false) — compare the blur" }
+);
+
 // Reply to two images with "!album" to group them into one gallery message.
 bot.command(
   "album",

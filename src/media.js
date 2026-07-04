@@ -7,7 +7,7 @@
  */
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
-import { downloadMediaMessage, extractImageThumb } from "../vendor/core/lib/index.js";
+import { downloadMediaMessage, extractImageThumb, prepareWAMessageMedia } from "../vendor/core/lib/index.js";
 
 /**
  * Download the media attached to a WA message (image/video/audio/sticker/
@@ -108,6 +108,49 @@ export async function resolveThumbnail(source, width = 730) {
   }
   const { buffer } = await extractImageThumb(input, width);
   return buffer;
+}
+
+/**
+ * Uploads a thumbnail image to WA's media CDN as a `thumbnail-link` — the
+ * exact mechanism WhatsApp's own client uses for real link-preview cards
+ * (`getUrlInfo()` + `uploadImage` in the vendored core). Returns an object
+ * shape ready to spread into a `linkPreview` content object as
+ * `highQualityThumbnail`, so the recipient's client re-fetches the actual
+ * full-resolution image from WA's servers instead of only ever seeing the
+ * small, quality-50 embedded `jpegThumbnail`.
+ *
+ * Requires network access (an upload round-trip), unlike `resolveThumbnail()`
+ * which is purely local/embedded. If the upload fails (offline, WA media
+ * host hiccup, etc.), the caller should catch and fall back to embedded-only
+ * — the card will still send, just blurrier.
+ *
+ * @param {import('../vendor/core/lib/index.js').WASocket} sock
+ * @param {Buffer|string} source Buffer, local file path, or http(s) URL.
+ * @returns {Promise<{directPath, mediaKey, mediaKeyTimestamp, width, height, fileSha256, fileEncSha256}|undefined>}
+ */
+export async function resolveHighQualityThumbnail(sock, source) {
+  if (source === null || source === undefined) {
+    throw new TypeError("Thumbnail source is required");
+  }
+  if (typeof sock?.waUploadToServer !== "function") {
+    throw new Error(
+      "resolveHighQualityThumbnail() requires sock.waUploadToServer — pass the live socket instance."
+    );
+  }
+  const { imageMessage } = await prepareWAMessageMedia(
+    { image: resolveMediaSource(source) },
+    { upload: sock.waUploadToServer, mediaTypeOverride: "thumbnail-link" }
+  );
+  if (!imageMessage) return undefined;
+  return {
+    directPath: imageMessage.directPath,
+    mediaKey: imageMessage.mediaKey,
+    mediaKeyTimestamp: imageMessage.mediaKeyTimestamp,
+    width: imageMessage.width,
+    height: imageMessage.height,
+    fileSha256: imageMessage.fileSha256,
+    fileEncSha256: imageMessage.fileEncSha256,
+  };
 }
 
 /** Builds a minimal WhatsApp-compatible vCard from a simple {name, number}. */
